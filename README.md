@@ -1,0 +1,1 @@
+Written in 65816 assembly. This in-game logic handler will process and add in various items sent from Archipelago to the player, instead of having the server add the items directly. This should combat any potential desync issues, as well as items that may be sent but never received.
