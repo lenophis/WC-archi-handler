@@ -1,23 +1,7 @@
 
-; Worlds Collide Archipelago in-game logic item handler - alpha 2 - January 19, 2025
+; Worlds Collide Archipelago in-game logic item handler - alpha 3 - January 20, 2025
 
 hirom
-
-org $C0BDE4
-; we are hijacking the part of SRAM init that sets SwdTech names to SRAM. this feature is never used outside of the Japanese version
-; coming in, X is 0
-STX $1440  ; zero our archipelago flag
-NOP    ; this removes the rest of the LDA $CF3C40,X instruction
-NOP
-NOP
-NOP    ; this removes the STA $1CF8,X instruction
-NOP    ; this removes the INX instruction
-NOP
-NOP
-NOP    ; this removes the CPX #$0030 instruction
-NOP
-NOP    ; this removes the BNE instruction for the loop
-
 
 ;;;;;;;;;;;;;;;;;;;
 
@@ -418,6 +402,8 @@ BNE handle_esper_loop
 handle_esper_exit:
 RTS
 
+; as of now, there is 0x1E free bytes of space left over from the ATB takeover
+
 ; now we need to adjust the look-up table for the ATB, since we're moving it to bank F0
 org $C16861
 LDA $F06500,X    ; new tentative location for the ATB table
@@ -464,6 +450,24 @@ DB $F8,$F8,$F8,$F8
 org $C37064
 JMP blank_more_SRAM
 
+org $C0FFD8    ; we are here only to change the internal ROM header to indicate a larger SRAM size
+DB $04
+
+org $C0BDE4
+; we are hijacking the part of SRAM init that sets SwdTech names to SRAM. this feature is never used outside of the Japanese version
+; coming in, X is 0
+STX $1440  ; zero our archipelago flag
+NOP    ; this removes the rest of the LDA $CF3C40,X instruction
+NOP
+NOP
+NOP    ; this removes the STA $1CF8,X instruction
+NOP    ; this removes the INX instruction
+NOP
+NOP
+NOP    ; this removes the CPX #$0030 instruction
+NOP
+NOP    ; this removes the BNE instruction for the loop
+
 org $C3FB22    ; this is the first available byte free in bank C3. move accordingly if necessary
 blank_more_SRAM:
 ; right now, the added SRAM use will be:
@@ -489,7 +493,63 @@ SEP #$20
 PLB
 RTS
 
-org $C0FFD8    ; we are here only to change the internal ROM header to indicate a larger SRAM size
-DB $04
+;;;;;;;;;;;;;;;;;;;
 
+; now we need to handle saving the queue, since players will inevitably not be playing at all times
+
+SRAM_slot:
+DW $0000     ; slot 1
+DW $0400     ; slot 2
+DW $0800     ; slot 3
+
+SRAM_save:
+; we will put off writing the SRAM markers until we are done saving the queue
+LDA $66    ; load our save slot indicator again
+ASL A
+TAX
+REP #$20
+LDA SRAM_slot,X
+TAX
+SEP #$20
+LDY $00
+SRAM_save_loop:
+LDA $316000,X    ; load current queue byte
+STA $316400,X    ; save it to this slot's queue
+INY
+INX
+CPX #$0400
+BNE SRAM_save_loop
+JMP $7083       ; save the SRAM markers
+
+SRAM_load:
+; upon loading a save, we must transfer that save's queue to the live queue
+LDA $66    ; load our slot indicator again
+ASL A
+TAX
+REP #$20
+LDA SRAM_slot,X
+TAX
+SEP #$20
+LDY $00
+SRAM_load_loop:
+LDA $316400,X     ; load slot's queue byte
+STA $316000,X     ; copy it to the live queue
+INY
+INX
+CPX #$0400
+BNE SRAM_load_loop
+RTS
+
+; the only issue currently is that if you back out and start a new game, the "live" queue is from whatever slot you last wanted to load
+; so we have to account for that
+restore_live_SRAM:
+JSR blank_more_SRAM   ; this will be called if you cancel out of loading a save slot
+JMP $18C1
+
+SRAM_load2:
+JSR SRAM_load
+JMP $6915      ; execute the next routine like we were originally going to
+
+org $C329EE
+JSR SRAM_load2     ; this will load up the slot of whatever you confirm on the load screen
 
