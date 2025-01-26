@@ -1,5 +1,5 @@
 
-; Worlds Collide Archipelago in-game logic item handler - alpha 3 - January 20, 2025
+; Worlds Collide Archipelago in-game logic item handler - alpha 4 - January 26, 2025
 
 hirom
 
@@ -63,6 +63,8 @@ check_character:
 DEC A
 BNE check_item  ; this branch will take if non-zero, ie it's an item or gil
 JSR character_receipt
+; TODO - add in the routine call for level averaging here if the flag is set
+JSR $A17F     ; do natural abilities for this character
 BRA receive_wrapup
 check_item:
 DEC A
@@ -99,7 +101,6 @@ TAX
 LDA $C0B4F3,X  ; load our bitfield related to this character
 TSB $1EDC    ; add this character to the roster
 TSB $1EDE    ; add this character to the roster
-; TODO - call level averaging and natural abilities
 SEP #$20
 LDA #$1B   ; sound effect for item from a pot
 RTS
@@ -246,6 +247,8 @@ BNE battle_check_item
 LDA $316003,X   ; load our receiving character
 STA $2F35     ; store it for message purposes
 JSR character_receipt
+; TODO - add the routine call to level average here
+JSR $A17F     ; do natural abilities for this character
 JSR $02D3     ; play the sound effect
 LDA #$4A      ; placeholder. we need to add in a message for the character
 JSR battle_message  ; pop up our message at the top of the screen
@@ -481,13 +484,13 @@ PLB       ; now we're switching to bank 31
 LDX #$0000
 REP #$20
 blank_more_loop:
-STZ $6000,X     ; we're going to be blanking $316000 through $317FFF. we won't be using nearly this much, but we're blanking it all anyway in case future use needs it
+STZ $6000,X     ; we're going to be blanking $316000 through $3163FF. this will only blank the live queue. the live queue will get saved to its appropriate save slot down below
 INX
 INX
 STZ $6000,X
 INX
 INX
-CPX #$2000
+CPX #$0400
 BNE blank_more_loop
 SEP #$20
 PLB
@@ -498,17 +501,18 @@ RTS
 ; now we need to handle saving the queue, since players will inevitably not be playing at all times
 
 SRAM_slot:
+DW $0000
 DW $0000     ; slot 1
 DW $0400     ; slot 2
 DW $0800     ; slot 3
 
 SRAM_save:
 ; we will put off writing the SRAM markers until we are done saving the queue
-LDA $66    ; load our save slot indicator again
+PHA      ; save our slot indicator
 ASL A
 TAX
 REP #$20
-LDA SRAM_slot,X
+LDA SRAM_slot,X   ; load where in SRAM we will be saving the queue to
 TAX
 SEP #$20
 LDY $00
@@ -519,7 +523,9 @@ INY
 INX
 CPX #$0400
 BNE SRAM_save_loop
-JMP $7083       ; save the SRAM markers
+PLA
+STA $0224
+RTS
 
 SRAM_load:
 ; upon loading a save, we must transfer that save's queue to the live queue
@@ -552,4 +558,7 @@ JMP $6915      ; execute the next routine like we were originally going to
 
 org $C329EE
 JSR SRAM_load2     ; this will load up the slot of whatever you confirm on the load screen
+
+org $C31523
+JSR SRAM_save   ; save our SRAM, including our new queue
 
