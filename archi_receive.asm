@@ -1,5 +1,5 @@
 
-; Worlds Collide Archipelago in-game logic item handler - alpha 4 - January 26, 2025
+; Worlds Collide Archipelago in-game logic item handler - alpha 5 - August 8, 2025
 ; Worlds Collide Archipelago item gift logic handler - alpha 1 - August 8, 2025
 
 hirom
@@ -115,7 +115,8 @@ BRA receive_wrapup
 check_gil:
 JSR gil_receipt
 receive_wrapup:
-STZ $1440  ; zero out our flag telling us we received an item
+DEC $1440     ; do not zero this out in the event we still have items to process
+; STZ $1440  ; zero out our flag telling us we received an item
 JSR $02D3  ; play the sound effect, notifying the player they have received an item
 PLX
 REP #$20
@@ -168,7 +169,8 @@ BRA receive_wrapup_world
 check_gil_world:
 JSR gil_receipt
 receive_wrapup_world:
-STZ $1440  ; zero out our flag telling us we received an item
+DEC $1440
+; STZ $1440  ; zero out our flag telling us we received an item
 STA $2141    ; play the sound effect
 LDA #$80     ; normal speaker balance
 STA $2142
@@ -370,7 +372,8 @@ SEP #$20
 LDA #$26
 JSR battle_message  ; pop up our message at the top of the screen
 battle_receive_wrapup:
-STZ $1440  ; zero out our flag telling us we received an item
+DEC $1440
+; STZ $1440  ; zero out our flag telling us we received an item
 REP #$21       ; 
 LDA $316000    ; increment the index so whenever archipelago sends another item, it is in the next free spot in the queue
 INC A
