@@ -1,9 +1,35 @@
 
 ; Worlds Collide Archipelago in-game logic item handler - alpha 4 - January 26, 2025
+; Worlds Collide Archipelago item gift logic handler - alpha 1 - August 8, 2025
 
 hirom
 
+table FF6-FWF.tbl,rtl
+
 ;;;;;;;;;;;;;;;;;;;
+
+; we need to hook one of our unused menu calls to now call a menu screen to send gifts for multiworld users
+
+org $C300F0
+DW C3send_gift
+
+
+org $C30277
+; we are hooking the massive LUT that the main menu loop calls
+DW C3send_how_many_initiate     ; #$4E
+DW C3send_how_many_sustain      ; #$4F
+
+org $C3029B
+; we are hooking the massive LUT that the main menu loop calls
+DW C3send_item_list_sustain    ; #$60
+
+org $C302CB
+; we are hooking the massive LUT that the main menu loop calls
+DW C3send_item_list_initiate    ; #$78
+DW $9E7D     ; switching characters while selecting a relic slot to fill; #$79
+DW $9E8B     ; switching characters while selecting a relic slot to empty; #$7A
+DW C3send_gift_initiate    ; #$7B
+DW C3send_gift_sustain    ; #$7C
 
 ; we need to hook a few locations to set up a "check queue for receiving items from archipelago"
 ; they will function similarly, but will have key differences
@@ -15,6 +41,20 @@ JSR check_queue1
 org $C06879
 ; this will handle when we are on the world map
 JSR check_queue2
+
+org $C09926
+; hook our event script LUT to add in a command. this will parse the quantity of the item the player is gifting to another, and prep it for dialogue display
+DW command_76    ; event command #$66 - process a number fed with the command and prepare it for dialogue display. can handle 8, 16, or 24 bit values
+DW command_67    ; event command #$67 - process all incoming gifts from the multiworld server
+
+org $C099A2
+; hook our event script LUT to add in a command so we can call our menu
+DW C0multi_gift_item  ; event command #$A4
+
+org $C09A26
+; hook our event script LUT to add in a command to physically send out a gift to another player. the SNI client will then grab this and parse as necessary
+DW C0multi_gift_send  ; event command #$E6
+
 
 ; receiving items during battle will be handled in battle
 ; we will not be receiving archi items while in the menu. NMI timing is too tight
@@ -28,7 +68,7 @@ RTS
 
 check_queue2:
 PHA
-JSR receive_item
+JSR receive_item_world
 PLA
 STZ $420C
 RTS
@@ -65,6 +105,7 @@ BNE check_item  ; this branch will take if non-zero, ie it's an item or gil
 JSR character_receipt
 ; TODO - add in the routine call for level averaging here if the flag is set
 JSR $A17F     ; do natural abilities for this character
+LDA #$1B   ; sound effect for item from a pot
 BRA receive_wrapup
 check_item:
 DEC A
@@ -86,6 +127,65 @@ TDC
 SEP #$20
 RTS
 
+receive_item_world:
+LDA $1440   ; this is our flag indicator that will tell us if we have received an item from archipelago
+BEQ no_item_received_world   ; branch and exit out if no item was sent
+REP #$20
+LDA $1F64   ; load the current map
+CMP #$0033    ; is the current map WoB narshe mines for Moogle Defense?
+SEP #$20
+BNE proceed_item_receive_world  ; if not we don't care about the next check, move on and receive the item
+LDA $1EA5
+BIT #$40    ; is Moogle Defense ongoing or otherwise not done?
+BEQ no_item_received_world   ; if this bit is CLEAR, we have to not acquire anything right now. character acquisition during Moogle Defense has known issues. it would be faster to hold the queue than to manually parse it.
+proceed_item_receive_world:
+PHX  ; save X for later
+REP #$20   ; because there are about 400 checks, including checks that may be added in the future, we have to have a 16-bit index lookup here
+LDA $316000   ; load index of the next item sent from the archi server
+ASL A      ; we double it since each reward is two bytes; the item type and the item. sender may be added in the future
+TAX
+SEP #$20
+TDC        ; clear out upper A mostly, since these JSRs each transfer to index. we don't want tainted results
+LDA $316002,X  ; now load our reward type. currently there's only four types of items that can be sent to the player: character (2), esper (1), item (3), or gil (4)
+DEC A   ; first we immediately subtract 1 to make it zero-based
+; we will also keep this saved in SRAM for debugging purposes
+BNE check_character_world  ; this branch will take if non-zero, ie it's a character, item, or gil
+JSR esper_receipt
+BRA receive_wrapup_world
+check_character_world:
+DEC A
+BNE check_item_world  ; this branch will take if non-zero, ie it's an item or gil
+JSR character_receipt
+; TODO - add in the routine call for level averaging here if the flag is set
+JSR $A17F     ; do natural abilities for this character
+LDA #$1B   ; sound effect for item from a pot
+BRA receive_wrapup_world
+check_item_world:
+DEC A
+BNE check_gil_world   ; this branch will take if non-zero, ie the only reward left is gil. this also doubles up as a safety net in case the value is somehow higher, so we just default to gil until the code for the newly-added type is programmed in
+JSR item_receipt
+BRA receive_wrapup_world
+check_gil_world:
+JSR gil_receipt
+receive_wrapup_world:
+STZ $1440  ; zero out our flag telling us we received an item
+STA $2141    ; play the sound effect
+LDA #$80     ; normal speaker balance
+STA $2142
+LDA #$18
+STA $2140    ; APU I/O register 0
+PLX
+REP #$20
+LDA $316000    ; increment the index so whenever archipelago sends another item, it is in the next free spot in the queue
+INC A
+STA $316000
+no_item_received_world:
+TDC
+SEP #$20
+RTS
+
+
+
 handle_receipt:
 ; if anything additional is sent beyond these 4 types, add it to the end of this jump table. label accordingly
 ; DW character_receipt
@@ -102,7 +202,6 @@ LDA $C0B4F3,X  ; load our bitfield related to this character
 TSB $1EDC    ; add this character to the roster
 TSB $1EDE    ; add this character to the roster
 SEP #$20
-LDA #$1B   ; sound effect for item from a pot
 RTS
 
 esper_receipt:
@@ -316,6 +415,297 @@ C2642B:	PLX
 C25FED:	PLP
 C25FEE:	RTS
 
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+C0multi_gift_item:
+; now we need to handle the setup process to send out items as gifts to other players in the multiworld. this is different than typical sending/receiving like would happen with checks
+LDA #$05
+STA $0200   ; which menu aspect we are calling. in this case the world recipient and subsequent item list
+LDA #$FF
+STA $0201   ; anti-corruption purposes. this is the player
+STA $0205   ; anti-corruption purposes. this is the item
+JSR $C6CA   ; call the menu
+LDA $0205   ; load item to send
+CMP #$FF    ; did we select an item?
+BEQ C0multi_no_item   ; branch if not
+; with either of these two checks failing, we will branch over our script of sending an item out. essentially exit out
+LDA $0201   ; load recipient
+CMP #$FF    ; do we have a valid recipient?
+BEQ C0multi_no_item   ; branch if not
+LDA #$02
+TRB $1EAF
+DEC A
+STA $84     ; for some reason, $84 must be non-zero (or 1) when exiting a menu call to $C6CA
+JMP $9B70   ; advance the queue 1 byte
+
+C0multi_no_item:
+; if we are here, we need to skip over the next parts of the script
+; it will be a message call with a prompt to verify if that's the item you want to send to that player
+LDA #$02
+TSB $1EAF
+DEC A
+STA $84     ; for some reason, $84 must be non-zero (or 1) when exiting a menu call to $C6CA
+JMP $9B70   ; advance the queue 1 byte
+
+C0multi_gift_send:
+; do code here for SNI purposes
+; first, remove the item from your inventory
+LDX $00
+C0multi_gift_loop:
+LDA $1869,X   ; load inventory slot
+CMP $0205    ; compare it with the item we are sending out
+BEQ C0remove_item1
+INX
+CPX #$0100   ; have we looped through the entire inventory yet?
+BNE C0multi_gift_loop
+BRA C0multi_finish    ; if for whatever reason our previous failsafe didn't work, exit and attempt to send nothing
+
+C0remove_item1:
+LDA $1969,X
+SEC
+SBC $0202
+STA $1969,X
+BNE C0multi_item_quantity
+LDA #$FF
+STA $1869,X    ; this item slot is now empty
+C0multi_item_quantity:
+
+C0multi_finish:
+LDA #$01
+JMP $9B70    ; advance the event queue one byte
+
+
+C0send_check_characters:
+; we need to add in a check for a character decoder
+CMP #$1C    ; is this our player tag?
+BEQ C0multi_decode_player   ; branch if so. we need to parse it for the dialogue
+CMP #$02
+BCC C0multi_decode_exit     ; is it 0 or 1? ie terminator or new line?
+CMP #$10
+BCS C0multi_decode_exit
+C0multi_decode_player:
+TDC
+LDA $CF
+BPL C0multi_decode_exit    ; branch if $CF is positive. don't do this now
+LDA $0201    ; load our recipient
+REP #$20
+ASL A
+ASL A
+ASL A
+ASL A      ; * 16
+TAY
+TDC
+SEP #$20
+LDA #$F1
+PHA
+PLB
+C0multi_decode_loop:
+LDA $0002,Y    ; load from F1/0002 indexed
+CMP #$FF      ; space or terminator?
+BEQ C0multi_decode_exit
+SEC
+SBC #$60      ; subtract to set to VWF values
+TAX
+LDA $C48FC0,X  ; load width for variable font cell
+CLC
+ADC $C0
+STA $C0
+INY
+CPY #$0010
+BEQ C0multi_decode_exit
+BRA C0multi_decode_loop
+
+C0multi_decode_exit:
+LDA #$00
+PHA
+PLB
+SEC
+RTS
+
+C0multi_player_render:
+; now we need to actually grab the player name and draw it to the screen
+LDA $0201    ; load our recipient
+REP #$20
+ASL A
+ASL A
+ASL A
+ASL A      ; * 16
+TAY
+SEP #$20
+TDC
+LDX $00     ; X = #$0000
+LDA #$F1
+PHA
+PLB
+C0multi_player_loop:
+LDA $0002,Y    ; $F1/0002 indexed
+SEC
+SBC #$60
+STA $7E9183,X
+CMP #$9F
+BEQ C0multi_player_finish
+INY
+INX
+CPY #$0010
+BEQ C0multi_player_finish
+BRA C0multi_player_loop
+C0multi_player_finish:
+TDC
+PHA
+PLB
+STA $7E9183,X
+STZ $CF
+JMP $8263
+
+
+
+;;;;;;;;;;;;;;;;;;;;
+; event command #$66 format: #$66 address 00/01/02 => last byte selects 8/16/24 bit mode
+; feed the command a 2-byte argument for the number to display, so 66 xx xx yy
+command_76:
+LDA #$7E
+STA $24        ; bank byte is #$7E
+PEI ($EB)      ; !
+REP #$20
+PLA            ; !
+STA $22        ; address to look into is now 7E/xxxx
+LDA [$22]      ; load the contents of 7E/xxxx
+PHA            ; save it for later, eventually for number displaying
+LDA $ED        ; 8/16/24-bit marker, $EE is garbage anyway so there's no need to mask it out
+LSR A
+BCS sixteen_bits
+LSR A
+BCS twentyfour_bits
+PLA            ; get our number to display
+STA $22        ; save it
+STZ $23        ; except this is 8-bit mode, so kill that middle byte (and high byte)
+BRA finish_up
+sixteen_bits:
+PLA            ; get our number to display
+STA $22        ; save it
+SEP #$20
+STZ $24        ; this must be kept clean in 16-bit mode, otherwise the number will be at least 8.2 million
+finish_up:
+TDC
+JSR $02E5      ; display contents of $22 to dialogue, the only question mark is if $26 matters at all, and indications are it does not
+LDA #$04
+JMP $9B5C
+
+twentyfour_bits:
+INC $22        ; coming in, A is 16-bit. It has to be, otherwise there's a wrapping error (^_^)
+               ; but wait, $24 isn't accounted for! true, but we don't care at all about bank 7F
+INC $22        ; increment up 2 bytes to get to the highest byte
+LDA [$22]      ; load 7E/xxxx+2
+STA $24        ; save highest byte, used for number display
+REP #$20
+PLA
+STA $22        ; and finally save the first two for number display
+BRA finish_up
+
+command_67:
+; event command #$67 format is just the byte. it will handle all items being received
+LDX $00    ; zero index
+TXY        ; and also to Y for the inventory index
+REP #$20
+LDA $316C00    ; load gift index queue
+BEQ no_gift_received
+DEC A
+ASL A
+TAX
+gift_item_queue_loop:
+REP #$20
+LDA $316C02,X    ; load the first item received
+BEQ out_of_gifts   ; sanity check to make sure we are actually receiving an item, or if we've looped through our queue and need to exit out
+STA $1A
+SEP #$20
+LDA #$02
+TSB $1EAF      ; our marker to indicate we have received and parsed at least 1 gift
+PHX
+JSR gift_item_receipt   ; call our new routine to add in multiple items we just received
+PLX
+DEX
+DEX
+BRA gift_item_queue_loop
+
+out_of_gifts:
+; load our two-byte queue indicator
+LDA $316C00
+ASL A
+TAX
+out_of_gifts_loop:
+TDC
+STA $316C00,X
+DEX
+DEX
+BPL out_of_gifts_loop
+STZ $316C00      ; zero out the gift queue
+
+no_gift_received:
+SEP #$20
+TDC
+LDA #$01        ; we're done here, advance the event queue
+JMP $9B5C
+
+
+
+gift_item_receipt:
+LDX $00
+gift_item_loop:
+LDA $1869,X
+CMP $1A
+BEQ gift_item_match
+INX
+CPX #$0100
+BNE gift_item_loop
+; if we have reached this point, we didn't match a pre-existing item. so now we will find the first empty slot and add it to the inventory
+LDX $00
+gift_item_empty_loop:
+LDA $1869,X
+CMP #$FF      ; no item here?
+BEQ gift_item_empty_match
+INX
+BRA gift_item_empty_loop
+
+
+gift_item_empty_match:
+LDA $1A             ; load the item received
+STA $1869,X
+LDA $1B
+STA $1969,X
+RTS
+
+gift_item_match:
+LDA $1969,X
+CLC
+ADC $1B
+CMP #$63      ; did we hit the 99 cap?
+BCC gift_item_cap
+LDA #$63
+gift_item_cap:
+STA $1969,X
+RTS
+
+
+org $C0840F
+C0840F:
+; we will just hijack the original render routine of outputting learning a spell, since it's unused
+CMP #$18    ; is it a previously unused tag?
+BNE C08050
+JMP C0multi_player_render
+
+C08050:
+CMP #$1B    ; is it the learn spell tag?
+BNE C0844B  ; branch if not
+LDA $0205   ; load item to send to our multiworld recipient
+BRA C083DA  ; and branch away to the original item fetch treasure code to parse it out
+
+org $C0844B
+C0844B:
+
+org $C083DA
+C083DA:
+
 org $C25F78
 ; this is after the loop of items found from enemies, after money dropped from enemies (and subsequently doubled from Cat Hood), but before the money message. the money from monsters will remain the final message
 JSR archi_battle
@@ -474,8 +864,12 @@ NOP    ; this removes the BNE instruction for the loop
 org $C3FB22    ; this is the first available byte free in bank C3. move accordingly if necessary
 blank_more_SRAM:
 ; right now, the added SRAM use will be:
-; first two bytes are the item queue index
+; $316000 - first two bytes are the item queue index
 ; the next 0x320 bytes are the items being sent from the Archipelago server
+; repeat this 3 more times. the first copy will be the "live" copy, while the next three will be for each save slot respectively
+; $316C00 - the first two bytes are the item gift queue index
+; the next 0x3FE bytes are the items being gifted from other players in the multiworld. this will allow us to process up to 511 gifts at once
+; once a gift has been processed, we will zero it out. this will have the side effect of gifts not being able to be re-received if a player starts a new game
 ; repeat this 3 more times. the first copy will be the "live" copy, while the next three will be for each save slot respectively
 SEP #$20
 LDA #$31
@@ -485,9 +879,11 @@ LDX #$0000
 REP #$20
 blank_more_loop:
 STZ $6000,X     ; we're going to be blanking $316000 through $3163FF. this will only blank the live queue. the live queue will get saved to its appropriate save slot down below
+STZ $6C00,X     ; we're going to be blanking $316C00 through $316FFF. this will only blank the live queue. the live queue will get saved to its appropriate save slot down below
 INX
 INX
 STZ $6000,X
+STZ $6C00,X
 INX
 INX
 CPX #$0400
@@ -519,6 +915,8 @@ LDY $00
 SRAM_save_loop:
 LDA $316000,X    ; load current queue byte
 STA $316400,X    ; save it to this slot's queue
+LDA $316C00,X    ; load gifts received
+STA $317000,X    ; save it to this slot's queue
 INY
 INX
 CPX #$0400
@@ -540,6 +938,8 @@ LDY $00
 SRAM_load_loop:
 LDA $316400,X     ; load slot's queue byte
 STA $316000,X     ; copy it to the live queue
+LDA $317000,X     ; load gifts received
+STA $316C00,X     ; save it to the live queue
 INY
 INX
 CPX #$0400
@@ -556,9 +956,507 @@ SRAM_load2:
 JSR SRAM_load
 JMP $6915      ; execute the next routine like we were originally going to
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; this code is for the new menu that will be called from an NPC in the beginner's house to send gifts!
+; receiving gifts will be handled automatically by talking to the NPC
+
+C3send_menu_label:
+DW $7915 : DB "Multiworld Gifting",$00   ; tilemap position - text and terminator
+
+C3send_owned_screen2:
+DW $7CB3 : DB "Owned:",$00
+C3send_equipped_screen2:
+DW $7BB3 : DB "Equipped:",$00
+
+C3send_small_window:
+DW $588B : DB $1C,$02
+
+C3send_desc_window_screen2:
+DW $618B : DB $1C,$03
+
+C3send_item_window_screen2:
+DW $62CB : DB $11,$08
+
+C3send_owned_window_screen2:
+DW $62F1 : DB $09,$08
+
+C3send_small_window_screen2:
+DW $608B : DB $1C,$02
+
+C3send_gift:
+JSR $3F99    ; font color selection
+LDA #$7B     ; menu selection, initiate screen to send gifts
+STA $26
+JMP $01BA    ; go to main menu loop. it will jump below
+
+C3send_gift_initiate:
+; this menu will "borrow" much from the colloseum code in terms of appearance
+LDA #$01
+STA $2107    ; 64x32
+JSR $1AE2    ; sets maximum scroll, initiate variables, etc. the max scroll is going to be based on the item count, which is 256 total items. may need to tweak this to account for larger multiworlds
+JSR $7D25    ; set initial hotspots
+JSR $6A28    ; clear BG2 tilemap A
+JSR $6A2D    ; clear BG2 tilemap B
+JSR $6A32    ; clear BG2 tilemap C
+JSR $6A3C    ; clear BG3 tilemap A
+JSR $6A41    ; clear BG3 tilemap B
+JSR $6A46    ; clear BG3 tilemap C
+JSR $6A4B    ; clear BG3 tilemap D
+JSR $6A15    ; clear BG1 tilemap A
+JSR $6A19    ; clear BG1 tilemap B
+JSR $6A1E    ; clear BG1 tilemap C
+LDY #C3send_small_window
+JSR $0341   ; build the window
+LDY #$AD92  ; the item description window
+JSR $0341   ; build the window
+LDY #$AD96  ; use the same window that the colloseum item list has
+JSR $0341   ; build the window
+LDY #C3send_desc_window_screen2
+JSR $0341
+LDY #C3send_small_window_screen2
+JSR $0341
+LDY #C3send_item_window_screen2
+JSR $0341
+LDY #C3send_owned_window_screen2
+JSR $0341
+JSR $0E52
+JSR $A73D    ; build tilemap for descriptions. used originally by item menu and colloseum
+LDY #C3send_menu_label   ; page header
+LDA #$2C
+STA $29     ; set text color to blue
+JSR $02F9   ; draw the text
+LDA #$20
+STA $29
+JSR C3send_world_type_desc      ; this call will clear out anything in the description buffer. normally it would output a description but for setup we just want the string cleared
+JSR C3send_draw_player_names    ; get the list of players in this multiworld, and output them as text
+JSR $0E28
+JSR $0E36
+JSR $0E6E
+JSR $0E7C
+JSR $1B0E
+LDA #$01
+TSB $45      ; clear out current description, present or not
+STA $26      ; transition
+JSR $1368
+LDA #$7C    ; sustain the gift menu
+STA $27
+LDA #$02    ; cursor is on
+STA $46
+JSR $07B0    ; queue up cursor OAM
+JMP $3541   ; BRT is 1 and also trigger NMI
+
+C3send_draw_player_names:
+JSR $83F7
+LDY #$000A      ; displaying up to 10 names at once
+C3send_text_continue:
+PHY
+JSR C3send_draw_player_names2    ; get a name and draw it
+LDA $E6
+INC A
+INC A
+AND #$1F
+STA $E6
+PLY
+DEY
+BNE C3send_text_continue
+RTS
+
+C3send_draw_player_names2:
+LDX #$9E8B
+STX $2181
+TDC
+LDA $E6
+INC A
+LDX #$0003
+JSR $809F
+REP #$20
+TXA
+STA $7E9E89
+SEP #$20
+LDA $E5
+CMP $F10000
+BCS C3send_text2_no_string
+LDA #$F1
+STA $F2
+TDC
+LDA $E5   ; load current position
+REP #$20
+ASL A     ; * 2
+ASL A     ; * 4
+ASL A     ; * 8
+ASL A     ; * 16
+INC A
+INC A     ; and then add 2
+STA $F0
+TDC
+SEP #$20
+LDY $00
+C3send_text2_continue:
+LDA [$F0],Y
+CMP #$FF
+BEQ C3send_text2_end
+STA $2180
+INY
+CPY #$0010
+BEQ C3send_text2_end
+BRA C3send_text2_continue
+C3send_text2_end:
+STZ $2180
+INC $E5
+JMP $7FD9
+
+C3send_text2_no_string:
+LDY #$0020
+LDA #$FF
+C3send_text2_no_string_loop:
+STA $2180
+DEY
+BPL C3send_text2_no_string_loop:
+STZ $2180
+INC $E5
+JMP $7FD9
+
+
+C3send_gift_sustain:
+LDA #$10
+TRB $45    ; set menu flag, enable descriptions
+LDA #$06    ; for L/R scrolling
+STA $2A
+JSR $0EFD
+JSR $1F64   ; handle L/R for scrolling
+BCS C3send_RTS2   ; exit if pressed
+JSR $7D22     ; hotspot data
+JSR C3send_world_type_desc   ; we will output what game the player is playing in the description box
+LDA $08
+BPL C3send_check_B_press    ; branch if we are not pressing A/confirm, and go check for B
+; we are here if we pressed A on a player
+; now we need 1 sanity check to make sure the player didn't select a blank spot
+TDC
+LDA $4B    ; load our position in the list. this determines who we are sending an item to.
+; we aren't going to try and determine *if* the player can receive items, since the framework will do that for us. we only care to send the items out
+CMP $F10000   ; compare it to the total number of players in this multiworld. right now there is one flaw with this, and that's if there are more than 255 people in the session
+BCS C3send_invalid
+; so if we press A/confirm, we have selected our world to send an item to
+; which means we need to generate the current item list
+STA $0201   ; save our recipient
+LDA #$78
+STA $26
+JMP $0EB2    ; click
+
+C3send_invalid:
+JSR $0EC0   ; buzzer
+JSR $305D   ; mosaic
+
+C3send_item_list_initiate:
+; we only need to clear the tilemap of the previous list, and then fill it with the items
+; essentially all other menu work that previously exists for the other menu will work here
+; C3/7E0D will populate our item list
+; C3/82F1 will populate the item's description, if it has one
+; JSR $6A3C    ; clear tilemap of previous list
+JSR $7D25    ; set initial hotspots
+JSR $7E0D    ; and now fill in the item list
+LDA #$10
+TSB $45      ; menu flags. turn off descriptions for now
+JSR $82F1    ; item descriptions, but in this case clear out the buffer
+JSR $1368    ; trigger NMI
+LDA #$02
+STA $46
+JSR $1B0E     ; re-initialize the finger, the arrows, and do HDMA setup
+LDA #$60
+STA $26       ; since $1B0E puts #$01 into $26, we wait until after execution to set the next menu here
+C3send_RTS2:
+RTS
+
+C3send_item_list_sustain:
+LDA #$10
+TRB $45      ; menu flags. turn the descriptions back on
+STZ $2A     ; for L/R scrolling
+JSR $0EFD
+JSR $1F64   ; handle L/R for scrolling
+BCS C3send_RTS
+JSR $7D22
+JSR $82F1    ; draw the item description of the current item if it has one
+LDA $08
+BPL C3send_check_B_press
+; we are here if we are selecting an item. make sure we aren't trying to send nothing
+TDC
+LDA $4B     ; load position
+TAX
+LDA $1869,X  ; load item in slot
+CMP #$FF     ; blank item?
+BEQ C3send_invalid
+STA $0205    ; store as our item to send
+LDA $1969,X
+STA $64      ; this will be the max we can possibly send out
+JSR $0EB2    ; click
+LDA #$4E     ; now we are going to call our "how many?" menu for a quantity to send
+STA $26
+RTS
+
+C3send_check_B_press:
+LDA $09
+BPL C3send_RTS   ; branch and exit if not pressing B to exit out
+JSR $0EC7   ; shift sound
+STZ $26    ; fade out
+LDA #$FF
+STA $27    ; exit the menu
+STA $0205   ; repurpose this to indicate to our NPC which item we are sending. in this case, clear it out since we are sending nothing
+STA $0202   ; repurpose this to indicate to our NPC what quantity we are sending. in this case, clear it out since we are sending nothing
+C3send_RTS:
+RTS
+
+C3send_how_many_initiate:
+; now we need to make a makeshift screen for the player to select how many of the item they just selected to send out
+; we will be borrowing elements from the "how many?" screen from the buy/sell menus in shops
+LDA #$10
+TRB $45      ; stop item descriptions from refreshing, but keep it displayed
+LDA #$20
+TSB $45      ; ignore joypad detection for descriptions. this effectively keeps the same one displayed at all times
+LDA #$02
+STA $46      ; turn off the scroll arrows
+JSR $B94E    ; clear BG1; this removes the item list
+JSR $0EFD
+JSR $1368    ; trigger NMI; update screen and clear out item list
+LDY $00
+STY $3B      ; set BG2 Y-position
+LDY #$0100
+STY $39      ; set BG2 X-position
+LDA #$01
+STA $28      ; we will start with 1
+JSR $04E0
+LDX #$7BAB   ; position of number to gift
+JSR $04B6
+JSR $0F39
+REP #$20
+LDA #$7B8F
+STA $7E9E89
+SEP #$20
+JSR $BFCB    ; get cursor position and point at inventory
+JSR $C068    ; draw our item name
+JSR $7FD9    ; output it to the tilemap
+LDA #$2C
+STA $29      ; set text color to blue
+LDY #C3send_owned_screen2
+JSR $02F9
+LDY #C3send_equipped_screen2
+JSR $02F9
+LDA #$20
+STA $29
+JSR $BF66    ; display total number of this item that are equipped between all of your party members
+TDC
+LDA $4B
+TAX
+LDA $1969,X
+JSR $04E0
+LDX #$7D3F
+JSR $04B6    ; display total number of this item that you own
+LDX #$0008
+STX $55
+LDX #$0054
+STX $57     ; set new finger X,Y coordinates
+INC $26     ; sustain this how many menu
+RTS
+
+
+C3send_how_many_sustain:
+; lots of code to do here
+; we will only handle +/- 1 at a time
+; first we check to see if we are pressing right
+LDA $0B
+LSR A      ; pressing right?
+BCC C3send_quantity_check_left
+LDA $28
+CMP $64    ; can we give more?
+BEQ C3send_quantity_check_A   ; branch and essentially do nothing if so. we can't give more than we have
+INC $28
+JSR $0EA3
+BRA C3send_quantity_check_A
+
+C3send_quantity_check_left:
+; A already holds the contents of $0B and it's been shifted once
+LSR A      ; pressing left?
+BCC C3send_quantity_check_A
+LDA $28
+CMP #$01     ; are we down to 1?
+BEQ C3send_quantity_check_A
+DEC $28
+JSR $0EA3
+
+C3send_quantity_check_A:
+LDA $28
+JSR $04E0
+LDX #$7BAB
+JSR $04B6       ; update the quantity we are displaying
+
+LDA $08
+BPL C3send_check_B_press2    ; branch if we are not pressing A/confirm, and go check for B
+
+
+; at long last, after everything has been confirmed in the menu, we exit out
+LDA $28
+STA $0202     ; we are sending this amount to the player
+STZ $0203
+LDA #$FF
+STA $27
+STZ $26
+RTS
+
+C3send_check_B_press2:
+LDA $09
+BPL C3send_RTS3   ; branch and exit if not pressing B to exit out
+JSR $0EC7   ; shift sound
+STZ $26    ; fade out
+LDA #$FF
+STA $27    ; exit the menu
+STA $0205   ; repurpose this to indicate to our NPC which item we are sending. in this case, clear it out since we are sending nothing
+STA $0202   ; repurpose this to indicate to our NPC what quantity we are sending. in this case, clear it out since we are sending nothing
+C3send_RTS3:
+RTS
+
+
+C3gift_scroll:
+JSR $7E95
+JMP C3send_draw_player_names
+
+
+C3send_world_type_desc:
+; we must now output the player's game in the description box
+LDX $00   ; #$0000
+STX $E7   ; pointer address will be $F3/0000
+STX $EB   ; make relativeness 0, effectively making the pointers absolute
+LDA #$F3   ; set bank
+STA $E9   ; full 24-bit address is now set
+STA $ED   ; and bank is now set for relativeness
+LDX #$9EC9
+STX $2181
+TDC
+LDA $4B   ; load position
+CMP $F10000   ; compare it to total number of players in this multiworld
+BCS C3send_item_no_desc
+JMP $5738   ; output our description, which in this case is our game name for our player 
+
+C3send_item_no_desc:
+LDA #$FF
+JMP $576D    ; send a blank description indicator, effectively blanking it
+
+; both of these LUTs are for the $2A value for scrolling our menus. we had to add two for the player select screen
+C319AF:	DW $1FD0
+C319B1:	DW $1FD6
+C319B3:	DW $1FDC
+C319B5:	DW $1FE2
+C319B7:	DW $1FE8
+C319B9:	DW $1FEE
+C319BB:	DW C3gift_scroll
+
+C382E5:	DW $7FA1
+	DW $4F9E
+	DW $5256
+	DW $53EE
+	DW $54E3
+	DW $9CE2
+	DW C3send_draw_player_names2
+
 org $C329EE
 JSR SRAM_load2     ; this will load up the slot of whatever you confirm on the load screen
 
 org $C31523
 JSR SRAM_save   ; save our SRAM, including our new queue
 
+org $C31FBF
+; we need to move the L/R scrolling LUT since we are adding an entry
+JSR (C319AF,X)
+
+org $C382E2
+; we need to move an additional scrolling LUT since we are adding an entry
+JSR (C382E5,X)
+
+
+;;;;;;;;;;;;;;;;;;;
+
+; now we need to make one change to an event script
+; we will be hooking the NPC behind the counter at the Narshe School
+; we will keep his original WoB/WoR check in for the dialogue, but then will need to add in dialogue and commands for the gifting of items
+; then call one new final dialogue to confirm sending the item to the recipient
+
+org $CC339C
+; first, move our event to another location
+DB $B2 : DL $01EFCA   ; call routine CB/EFCA
+DB $FE   ; end script
+
+org $CBEFCA
+DB $D3,$79   ; clear bit 179, $1EAF:1
+DB $C0 : DW $80A4 : DL OldCC33A6-$CA0000   ; if event bit $0A4 is set, (in WoR), branch to the address instead
+DB $4B : DW $0257   ; this is a classroom for the beginner. think of us as your advisors
+DB $91
+DB $67   ; process any gifts sent to you
+DB $C0 : DW $0179 : DL OldCCskipgift-$CA0000
+DB $4B : DW $0004    ; the game has processed gifts sent to you. this dialogue message acknowledges it
+OldCCskipgift:
+DB $91
+DB $4B : DW $0001
+DB $A4     ; call menu
+DB $66 : DW $0202 : DB $00    ; prepare our quantity for dialogue display. 8-bit range
+DB $92
+DB $C0 : DW $8179 : DL OldCCExitItem-$CA0000
+DB $4B : DW $0002
+DB $B6 : DL OldCCSendItem-$CA0000,$005EB3   ; branch based on selection in dialogue. in this case if you say yes it effectively branches forward 1 byte
+OldCCExitItem:
+DB $FE  ; end script
+
+OldCCSendItem:
+DB $E6  ; send out the item to the player in the multiworld session. this will also handle removing it from inventory
+DB $93  ; pause for 45
+DB $D3,$79   ; clear bit 179, $1EAF:1
+DB $4B : DW $0003  ; placeholder
+DB $FE
+
+OldCC33A6:
+DB $4B : DW $0258   ; we'll be here even if the world should crumble
+DB $C0 : DW $0179 : DL OldCCskipgift-$CA0000
+DB $4B : DW $0004    ; the game has processed gifts sent to you. this dialogue message acknowledges it
+DB $91    ; pause for 15
+DB $4B : DW $0001
+DB $A4     ; call menu
+DB $66 : DW $0202 : DB $00    ; prepare our quantity for dialogue display. 8-bit range
+DB $92
+DB $C0 : DW $8179 : DL OldCCExitItem-$CA0000
+DB $4B : DW $0002
+DB $B6 : DL OldCCSendItem-$CA0000,$005EB3   ; branch based on selection in dialogue. in this case if you say yes it effectively branches forward 1 byte
+DB $FE  ; end script
+
+
+org $CD0000
+; replace the dialogue at the beginning of CD/0000 with our multiworld dialogue
+incbin FF6_dialogue.bin
+
+org $CCE602
+; this is the pointer location for dialogue
+; we need to change the first three pointers
+DW $0000  ; the first entry is a dummy. keep it #$0000
+DW $0000  ; the first string still starts at CD/0000
+DW $002C  ; the second string is now at CD/002C
+DW $0057  ; and the third string is now at CD/0055
+DW $00A5
+
+
+org $C080D2
+; now we will hook part of our original dialogue decoding routine to add in outputting of a player name from the multiworld session
+C080D2:
+C080C7:	PLX 
+C080C8:	STX $C9
+C080CA:	PLA 
+C080CB:	STA $CB
+C080CD:	PLA 
+C080CE:	STA $CF
+C080D0:	RTS
+
+CMP #$1A      ; are we trying to get an item name from a box?
+BEQ C08118    ; branch if so
+JSR C0send_check_characters
+BCS C080D2    ; branch and exit if the parameter is between 2 and 16. this is outside our original character range
+NOP
+NOP
+NOP           ; three bytes need to be NOP'ed out to maintain the original size
+
+org $C08118
+C08118:
